@@ -101,7 +101,7 @@ deploy_app() {
 USE DATABASE TEMP; 
 USE SCHEMA JHILL;
 PUT file://app.py @TEMP.JHILL.snow_jumper_stage/snow_jumper_request AUTO_COMPRESS=FALSE OVERWRITE=TRUE;
-PUT file://snow_connection.py @TEMP.JHILL.snow_jumper_stage/snow_jumper_request AUTO_COMPRESS=FALSE OVERWRITE=TRUE;
+PUT file://browser_connection.py @TEMP.JHILL.snow_jumper_stage/snow_jumper_request AUTO_COMPRESS=FALSE OVERWRITE=TRUE;
 PUT file://requirements.txt @TEMP.JHILL.snow_jumper_stage/snow_jumper_request AUTO_COMPRESS=FALSE OVERWRITE=TRUE;
 PUT file://environment.yml @TEMP.JHILL.snow_jumper_stage/snow_jumper_request AUTO_COMPRESS=FALSE OVERWRITE=TRUE;"
     

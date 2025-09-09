@@ -7,7 +7,7 @@ This guide explains how to develop locally and deploy your Snow Jumper Streamlit
 ```
 SpecReq/
 ├── app.py                 # Main Streamlit application
-├── snow_connection.py     # Snowflake connection helper
+├── browser_connection.py  # Snowflake connection helper
 ├── snowflake.yml         # SnowCLI configuration
 ├── requirements.txt      # Python dependencies
 ├── environment.yml       # Conda environment for Snowflake
@@ -128,7 +128,7 @@ entities:
     title: "Snow Jumper Request"
     
     artifacts:
-      - snow_connection.py
+      - browser_connection.py
       - requirements.txt
       - environment.yml
       - app.py
