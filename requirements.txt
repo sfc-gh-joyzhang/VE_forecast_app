@@ -1,0 +1,13 @@
+# Core dependencies for Forecast Planning Tool
+streamlit
+matplotlib==3.7.2
+numpy==1.24.3
+pandas==2.0.3
+plotly
+openpyxl==3.1.2
+python-dotenv
+snowflake-connector-python
+
+# Note: snowflake-snowpark-python is automatically available in Streamlit in Snowflake
+# snowflake-connector-python is used for local browser authentication
+# Fixed versions for better compatibility with Snowflake environment
