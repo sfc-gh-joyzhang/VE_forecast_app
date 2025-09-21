@@ -7,9 +7,19 @@ from datetime import datetime, timedelta
 
 def get_session_defaults():
     """Return default session state values for organic growth"""
+    # Dynamically set start/end months: start = first day of this month 2 years ago,
+    # end = first day of the latest complete month
+    today = datetime.today()
+    first_of_this_month = datetime(today.year, today.month, 1)
+    last_complete_month_day = first_of_this_month - timedelta(days=1)
+    dynamic_end_month = datetime(
+        last_complete_month_day.year, last_complete_month_day.month, 1
+    ).strftime('%Y-%m-%d')
+    dynamic_start_month = datetime(today.year - 2, today.month, 1).strftime('%Y-%m-%d')
+
     return {
-        'og_start_month': '2023-05-01',  # Default to 24 months ago
-        'og_end_month': '2025-05-01',    # Default to latest month
+        'og_start_month': dynamic_start_month,  # Default to ~24 months ago
+        'og_end_month': dynamic_end_month,      # Default to latest complete month
         'og_compute_cmgr': 0.0,
         'og_storage_cmgr': 0.0,
         'og_other_cmgr': 0.0,
@@ -266,54 +276,33 @@ def render(connection, selected_customer_schema, validated_info, connection_type
                 
             growth_data[category][period_name] = growth_rate
     
-    # Display growth rates table
-    st.markdown("### Growth Rate Analysis")
-    
-    # Create table
-    col_headers = ['Metric'] + display_categories
-    cols = st.columns(len(col_headers))
-    
-    # Header row
-    for i, header in enumerate(col_headers):
-        with cols[i]:
-            st.markdown(f"**{header}**")
-    
-    # Data rows  
-    for period_name, _, _ in periods:
-        cols = st.columns(len(col_headers))
-        with cols[0]:
-            metric_label = f"{period_name} (%)" if period_name != 'CAGR' else "CAGR (%)"
-            st.markdown(f"**{metric_label}**")
-        
-        # Data columns
-        for i, category in enumerate(['COMPUTE', 'STORAGE', 'OTHER', 'DATA_TRANSFER', 'TOTAL']):
-            with cols[i + 1]:
-                # Map TOTAL to display as "COMPUTE (TOTAL)" but calculate using "TOTAL"
-                display_cat = category
-                    
-                growth_rate = growth_data[display_cat].get(period_name, 0.0)
-                color = "#28a745" if growth_rate > 0 else "#dc3545" if growth_rate < 0 else "#6c757d"
-                
-                st.markdown(f'<span style="color: {color}; font-weight: bold;">{growth_rate:.1f}%</span>', 
-                           unsafe_allow_html=True)
-    
+    # Custom Period CMGR Calculator (moved above Growth Rate Analysis)
     st.markdown("---")
     st.markdown("### Custom Period CMGR Calculator")
     
     col1, col2 = st.columns(2)
     with col1:
         start_month = st.selectbox(
-            "Start Month (Excel D22):",
+            "Start Month:",
             options=filtered_df['MONTH'].dt.strftime('%Y-%m-%d').tolist(),
             index=0,
             key='custom_start_month'
         )
     with col2:
+        # Default to the latest available month without setting Session State directly
+        end_options = filtered_df['MONTH'].dt.strftime('%Y-%m-%d').tolist()
+        existing_value = st.session_state.get('custom_end_month')
+        default_index = (
+            end_options.index(existing_value)
+            if existing_value in end_options
+            else len(end_options) - 1
+        )
         end_month = st.selectbox(
-            "End Month (Excel F22):",
-            options=filtered_df['MONTH'].dt.strftime('%Y-%m-%d').tolist(),
-            index=len(filtered_df)-1,
-            key='custom_end_month'
+            "End Month:",
+            options=end_options,
+            index=default_index,
+            key='custom_end_month',
+            help="Defaults to the latest complete month"
         )
     
     if start_month and end_month:
@@ -392,6 +381,37 @@ def render(connection, selected_customer_schema, validated_info, connection_type
         else:
             st.warning("End month must be after start month")
     
+    # After custom period section, show Growth Rate Analysis (moved below)
+    st.markdown("---")
+    st.markdown("### Growth Rate Analysis")
+    
+    # Create table
+    col_headers = ['Metric'] + display_categories
+    cols = st.columns(len(col_headers))
+    
+    # Header row
+    for i, header in enumerate(col_headers):
+        with cols[i]:
+            st.markdown(f"**{header}**")
+    
+    # Data rows  
+    for period_name, _, _ in periods:
+        cols = st.columns(len(col_headers))
+        with cols[0]:
+            metric_label = f"{period_name} (%)" if period_name != 'CAGR' else "CAGR (%)"
+            st.markdown(f"**{metric_label}**")
+        
+        # Data columns
+        for i, category in enumerate(['COMPUTE', 'STORAGE', 'OTHER', 'DATA_TRANSFER', 'TOTAL']):
+            with cols[i + 1]:
+                display_cat = category
+                growth_rate = growth_data[display_cat].get(period_name, 0.0)
+                color = "#28a745" if growth_rate > 0 else "#dc3545" if growth_rate < 0 else "#6c757d"
+                st.markdown(
+                    f'<span style="color: {color}; font-weight: bold;">{growth_rate:.1f}%</span>',
+                    unsafe_allow_html=True,
+                )
+
     # Store in session state for forecast overview
     st.session_state['og_compute_cmgr'] = growth_data['COMPUTE'].get('12 months', 0.0)
     st.session_state['og_storage_cmgr'] = growth_data['STORAGE'].get('12 months', 0.0)
@@ -399,35 +419,6 @@ def render(connection, selected_customer_schema, validated_info, connection_type
     st.session_state['og_data_transfer_cmgr'] = growth_data['DATA_TRANSFER'].get('12 months', 0.0)
     st.session_state['og_priority_support_cmgr'] = growth_data['PRIORITY_SUPPORT'].get('12 months', 0.0)
     st.session_state['og_total_cmgr'] = growth_data['TOTAL'].get('12 months', 0.0)
-    
-    # Transfer to Forecast Overview button
-    st.markdown("---")
-    
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col2:
-        if st.button(
-            "Apply Standard CMGR (12 months)",
-            help="Transfer 12-month CMGR values from the analysis table above",
-            use_container_width=True,
-            type="primary"
-        ):
-            # Store calculated values for use in main forecast (using 12-month CMGR)
-            st.session_state.forecast_year1_compute_growth = growth_data['COMPUTE'].get('12 months', 0.0)
-            st.session_state.forecast_year1_storage_growth = growth_data['STORAGE'].get('12 months', 0.0)
-            st.session_state.forecast_year1_other_growth = growth_data['OTHER'].get('12 months', 0.0)
-            st.session_state.forecast_year1_data_transfer_growth = growth_data['DATA_TRANSFER'].get('12 months', 0.0)
-            st.session_state.forecast_year1_priority_support_growth = growth_data['PRIORITY_SUPPORT'].get('12 months', 0.0)
-            
-            st.success(f"""
-            Applied Standard CMGR (12 months) to Forecast Overview:
-            - Compute: {growth_data['COMPUTE'].get('12 months', 0.0):.2f}% monthly
-            - Storage: {growth_data['STORAGE'].get('12 months', 0.0):.2f}% monthly  
-            - Other: {growth_data['OTHER'].get('12 months', 0.0):.2f}% monthly
-            - Data Transfer: {growth_data['DATA_TRANSFER'].get('12 months', 0.0):.2f}% monthly
-            - Priority Support: {growth_data['PRIORITY_SUPPORT'].get('12 months', 0.0):.2f}% monthly
-            
-            *Standard 12-month CMGR values will drive Year 1 of your main forecast.*
-            """)
         
     # Show data table
     with st.expander("View Monthly Data"):
