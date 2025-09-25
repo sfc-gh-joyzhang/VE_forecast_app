@@ -46,7 +46,7 @@ def init_session_state():
     if 'forecast_initialized' not in st.session_state:
         st.session_state.forecast_initialized = True
         st.session_state.selected_customer = 'SIEMENS_AG'
-        st.session_state.selected_slides = ['Organic Growth']
+        st.session_state.selected_slides = ['Forecast Overview', 'Organic Growth']
         
         # Forecast growth rates from organic growth
         st.session_state.forecast_year1_compute_growth = 0.0
@@ -184,197 +184,61 @@ st.markdown("""
 init_session_state()
 init_slide_session_state()
 
-# Sidebar with Salesforce customer input
+# Sidebar: Schema selection (replaces Salesforce ID flow)
 st.sidebar.markdown("""
-    <h3 style="color: #11567F;">Customer Selection</h3>
+    <h3 style="color: #11567F;">Schema Selection</h3>
 """, unsafe_allow_html=True)
 
-# Initialize Salesforce input session state
-if 'salesforce_account_id' not in st.session_state:
-    st.session_state.salesforce_account_id = ''
-if 'customer_name' not in st.session_state:
-    st.session_state.customer_name = ''
-if 'validated_customer_info' not in st.session_state:
-    st.session_state.validated_customer_info = None
+# Load and cache available schemas
+if 'available_finops_schemas' not in st.session_state:
+    try:
+        if use_snowpark:
+            session.sql("USE DATABASE FINOPS_OUTPUTS").collect()
+            schema_query = """
+            SELECT SCHEMA_NAME 
+            FROM INFORMATION_SCHEMA.SCHEMATA 
+            WHERE CATALOG_NAME = 'FINOPS_OUTPUTS'
+            ORDER BY SCHEMA_NAME
+            """
+            rows = session.sql(schema_query).collect()
+            st.session_state.available_finops_schemas = [r[0] for r in rows]
+        else:
+            cursor.execute("USE DATABASE FINOPS_OUTPUTS")
+            schema_query = """
+            SELECT SCHEMA_NAME 
+            FROM INFORMATION_SCHEMA.SCHEMATA 
+            WHERE CATALOG_NAME = 'FINOPS_OUTPUTS'
+            ORDER BY SCHEMA_NAME
+            """
+            df_s = execute_sql(cursor, schema_query)
+            st.session_state.available_finops_schemas = df_s['SCHEMA_NAME'].tolist()
+    except Exception as e:
+        st.sidebar.error(f"Failed to list schemas: {str(e)[:80]}")
+        st.session_state.available_finops_schemas = []
 
-# Salesforce Account ID input
-salesforce_id = st.sidebar.text_input(
-    "Salesforce Account ID:",
-    value=st.session_state.salesforce_account_id,
-    placeholder="e.g., 0018Z00002ABC123",
-    help="Enter the 18-character Salesforce Account ID",
-    key="salesforce_id_input"
+selected_schema = st.sidebar.selectbox(
+    "FINOPS_OUTPUTS Schema:",
+    options=[""] + st.session_state.available_finops_schemas,
+    index=0,
+    help="Choose the schema to analyze (e.g., CAPITAL_ONE_UE_20250606)",
 )
 
-# Auto-derive customer name from validation (no manual input needed)
-customer_name = st.session_state.get('customer_name', '')
-
-# Update session state
-st.session_state.salesforce_account_id = salesforce_id
-
-# Validate customer information
 validated_info = None
 selected_customer_schema = None
-
-if salesforce_id and len(salesforce_id) >= 15:
-    # Only validate if SF ID changed and user finished typing (avoid validation on every keystroke)
-    if ('last_validated_sf_id' not in st.session_state or 
-        st.session_state.last_validated_sf_id != salesforce_id) and len(salesforce_id) == 18:
-        with st.spinner("Loading customer information..."):
-            try:
-                # Step 1: Query Fivetran Salesforce to get real customer name from SFID
-                customer_name_from_sf = None
-                try:
-                    if use_snowpark:
-                        sf_query = f"""
-                        SELECT NAME, ID
-                        FROM FIVETRAN.SALESFORCE.ACCOUNT 
-                        WHERE ID = '{salesforce_id}'
-                        LIMIT 1
-                        """
-                        sf_result = session.sql(sf_query).collect()
-                        if sf_result and len(sf_result) > 0:
-                            customer_name_from_sf = sf_result[0][0]  # NAME column
-                    else:
-                        sf_query = f"""
-                        SELECT NAME, ID
-                        FROM FIVETRAN.SALESFORCE.ACCOUNT 
-                        WHERE ID = '{salesforce_id}'
-                        LIMIT 1
-                        """
-                        sf_df = execute_sql(cursor, sf_query)
-                        if not sf_df.empty:
-                            customer_name_from_sf = sf_df['NAME'].iloc[0]
-                            
-                except Exception as sf_error:
-                    st.warning(f"Salesforce lookup failed: {str(sf_error)}")
-                
-                if not customer_name_from_sf:
-                    st.error("Cannot find this Salesforce ID in Fivetran Salesforce data")
-                    st.session_state.validated_customer_info = None
-                    st.stop()
-                
-                # Step 2: Clean customer name for schema matching
-                # Convert "Chewy, Inc." -> "CHEWY", "Capital One Bank" -> "CAPITAL"
-                clean_name = customer_name_from_sf.upper()
-                clean_name = clean_name.replace(',', '').replace('.', '').replace(' INC', '').replace(' LLC', '').replace(' CORP', '').replace(' CORPORATION', '')
-                clean_name = clean_name.split()[0]  # Take first word: "CAPITAL ONE" -> "CAPITAL"
-                
-                # Step 3: Search FINOPS_OUTPUTS for schemas containing this customer name
-                discovered_schema = None
-                try:
-                    if use_snowpark:
-                        session.sql("USE DATABASE FINOPS_OUTPUTS").collect()
-                        
-                        # Use INFORMATION_SCHEMA instead of SHOW SCHEMAS (more reliable)
-                        schema_query = """
-                        SELECT SCHEMA_NAME 
-                        FROM INFORMATION_SCHEMA.SCHEMATA 
-                        WHERE CATALOG_NAME = 'FINOPS_OUTPUTS'
-                        ORDER BY SCHEMA_NAME
-                        """
-                        schema_result = session.sql(schema_query).collect()
-                        
-                        # First pass: Look for schemas that START with customer name (preferred)
-                        for row in schema_result:
-                            schema_name = row[0]  # SCHEMA_NAME column
-                            if schema_name.upper().startswith(clean_name + '_'):
-                                discovered_schema = schema_name
-                                break
-                                
-                        # Second pass: If no exact start match, look for customer name anywhere (fallback)
-                        if not discovered_schema:
-                            for row in schema_result:
-                                schema_name = row[0]  # SCHEMA_NAME column
-                                # Avoid false positives like ARCH_CAPITAL when looking for CAPITAL
-                                if (clean_name in schema_name.upper() and 
-                                    not schema_name.upper().startswith('ARCH_') and
-                                    not schema_name.upper().startswith('MARCH_')):
-                                    discovered_schema = schema_name
-                                    break
-                    else:
-                        cursor.execute("USE DATABASE FINOPS_OUTPUTS")
-                        
-                        # Use INFORMATION_SCHEMA instead of SHOW SCHEMAS (more reliable)
-                        schema_query = """
-                        SELECT SCHEMA_NAME 
-                        FROM INFORMATION_SCHEMA.SCHEMATA 
-                        WHERE CATALOG_NAME = 'FINOPS_OUTPUTS'
-                        ORDER BY SCHEMA_NAME
-                        """
-                        schema_df = execute_sql(cursor, schema_query)
-                        
-                        # First pass: Look for schemas that START with customer name (preferred)
-                        for _, row in schema_df.iterrows():
-                            schema_name = row['SCHEMA_NAME']
-                            if schema_name.upper().startswith(clean_name + '_'):
-                                discovered_schema = schema_name
-                                break
-                                
-                        # Second pass: If no exact start match, look for customer name anywhere (fallback)
-                        if not discovered_schema:
-                            for _, row in schema_df.iterrows():
-                                schema_name = row['SCHEMA_NAME']
-                                # Avoid false positives like ARCH_CAPITAL when looking for CAPITAL
-                                if (clean_name in schema_name.upper() and 
-                                    not schema_name.upper().startswith('ARCH_') and
-                                    not schema_name.upper().startswith('MARCH_')):
-                                    discovered_schema = schema_name
-                                    break
-                                
-                except Exception as schema_error:
-                    st.error(f"FINOPS_OUTPUTS schema search failed: {str(schema_error)}")
-                    st.session_state.validated_customer_info = None
-                    st.stop()
-                
-                if not discovered_schema:
-                    st.error(f"Cannot find customer '{customer_name_from_sf}' in FINOPS_OUTPUTS database")
-                    st.info("This customer may not have L3 analysis data available")
-                    st.session_state.validated_customer_info = None
-                    st.stop()
-                    
-                # Step 4: Success - found both customer in SF and schema in FINOPS_OUTPUTS
-                customer_name_derived = customer_name_from_sf
-                
-                # Store discovered customer name
-                st.session_state.customer_name = customer_name_derived
-                
-                # Create validation info
-                validated_info = {
-                    'salesforce_id': salesforce_id,
-                    'salesforce_name': customer_name_derived,
-                    'potential_schema': f'FINOPS_OUTPUTS.{discovered_schema}',
-                    'data_points': 1,  # Schema discovery successful
-                    'status': 'VALID'
-                }
-                st.session_state.validated_customer_info = validated_info
-                st.session_state.last_validated_sf_id = salesforce_id  # Prevent re-validation
-                
-                if validated_info['status'] == 'VALID':
-                    st.sidebar.success(f"{validated_info['salesforce_name']}")
-                else:
-                    st.sidebar.warning("Account found but no recent data")
-                    
-            except Exception as e:
-                st.sidebar.error(f"Error: {str(e)[:50]}...")
-
-# Use validated information or show validation requirement
-if st.session_state.validated_customer_info and st.session_state.validated_customer_info['status'] == 'VALID':
-    validated_info = st.session_state.validated_customer_info
+if selected_schema:
+    validated_info = {
+        'salesforce_id': selected_schema,  # kept for compatibility
+        'salesforce_name': selected_schema,
+        'potential_schema': f'FINOPS_OUTPUTS.{selected_schema}',
+        'status': 'VALID',
+    }
+    st.session_state.validated_customer_info = validated_info
     selected_customer_schema = validated_info['potential_schema']
-    
-    # Display validated customer info
     st.sidebar.markdown("---")
-    st.sidebar.markdown("**Customer Validated:**")
-    st.sidebar.markdown(f"**Name:** {validated_info['salesforce_name']}")
-    st.sidebar.markdown(f"**ID:** {validated_info['salesforce_id']}")
-    st.sidebar.markdown(f"**Schema:** `{validated_info['potential_schema']}`")
-    
-elif salesforce_id or customer_name:
-    st.sidebar.warning("Please click 'Validate Customer' to proceed")
-    selected_customer_schema = None
+    st.sidebar.markdown("**Schema Selected:**")
+    st.sidebar.markdown(f"`{selected_customer_schema}`")
 else:
-    st.sidebar.info("Enter Salesforce Account ID and Customer Name to begin")
+    st.sidebar.info("Select a FINOPS_OUTPUTS schema to begin")
 
 # Slide selection
 st.sidebar.markdown("""
@@ -404,22 +268,15 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Display current selections
+# Display current selection
 if validated_info:
-    col1, col2 = st.columns(2)
-    with col1:
-        st.info(f"**Customer:** {validated_info['salesforce_name']}")
-    with col2:
-        st.info(f"**Salesforce ID:** {validated_info['salesforce_id']}")
-        
+    st.info(f"Schema: `{validated_info['potential_schema']}`")
 else:
-    st.warning("Please validate a customer first using the sidebar to proceed with forecast analysis.")
+    st.warning("Please select a schema from the sidebar to proceed with forecast analysis.")
     st.markdown("""
     ### How to get started:
-    1. **Enter Salesforce Account ID** (18-character ID from Salesforce)
-    2. **Enter Customer Name** (exact or partial name for validation)  
-    3. **Click 'Validate Customer'** to verify data availability
-    4. **Select Analysis Modules** to begin forecasting
+    1. Select a `FINOPS_OUTPUTS` schema in the sidebar
+    2. Choose one or more analysis modules
     """)
 
 # Render selected slides - only if customer is validated

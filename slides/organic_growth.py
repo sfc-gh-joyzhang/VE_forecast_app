@@ -6,20 +6,10 @@ import streamlit as st
 from datetime import datetime, timedelta
 
 def get_session_defaults():
-    """Return default session state values for organic growth"""
-    # Dynamically set start/end months: start = first day of this month 2 years ago,
-    # end = first day of the latest complete month
-    today = datetime.today()
-    first_of_this_month = datetime(today.year, today.month, 1)
-    last_complete_month_day = first_of_this_month - timedelta(days=1)
-    dynamic_end_month = datetime(
-        last_complete_month_day.year, last_complete_month_day.month, 1
-    ).strftime('%Y-%m-%d')
-    dynamic_start_month = datetime(today.year - 2, today.month, 1).strftime('%Y-%m-%d')
-
+    """Return default sessionz state values for organic growth"""
     return {
-        'og_start_month': dynamic_start_month,  # Default to ~24 months ago
-        'og_end_month': dynamic_end_month,      # Default to latest complete month
+        'og_start_month': '2023-05-01',  # Default to 24 months ago
+        'og_end_month': '2025-05-01',    # Default to latest month
         'og_compute_cmgr': 0.0,
         'og_storage_cmgr': 0.0,
         'og_other_cmgr': 0.0,
@@ -134,136 +124,75 @@ def render(connection, selected_customer_schema, validated_info, connection_type
     # Convert MONTH to datetime for proper sorting
     df['MONTH'] = pd.to_datetime(df['MONTH'])
     df = df.sort_values('MONTH')
+    # Expose monthly totals for downstream Forecast Trend chart
+    try:
+        st.session_state['og_monthly_df'] = df[['MONTH', 'TOTAL']].copy()
+    except Exception:
+        pass
     
-    # Create month options for dropdowns
-    available_months = sorted(df['MONTH'].dt.strftime('%Y-%m-01').unique())
-    
-    # Date range selector UI
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        start_month = st.selectbox(
-            "START MONTH",
-            options=available_months,
-            index=0,  # Default to earliest month (full 2 years)
-            key="og_start_month_selector"
-        )
-        st.session_state.og_start_month = start_month
-        
-    with col2:
-        end_month = st.selectbox(
-            "END MONTH", 
-            options=available_months,
-            index=len(available_months) - 1,  # Default to latest month
-            key="og_end_month_selector"
-        )
-        st.session_state.og_end_month = end_month
-    
-    # Filter data to selected range
-    start_date = pd.to_datetime(start_month)
-    end_date = pd.to_datetime(end_month)
-    
-    filtered_df = df[
-        (df['MONTH'] >= start_date) & 
-        (df['MONTH'] <= end_date)
-    ].copy()
+    # Expose latest complete-month type split percentages for defaults in Use Case Forecaster
+    try:
+        latest_row = df.iloc[-1]
+        latest_total = float(latest_row['TOTAL']) if float(latest_row['TOTAL']) != 0 else 0.0
+        if latest_total > 0:
+            # Expose latest month total for 5-year baseline in Use Case Forecaster
+            st.session_state['og_latest_month_total'] = latest_total
+            latest_compute_pct = float(latest_row['COMPUTE']) / latest_total * 100.0
+            latest_storage_pct = float(latest_row['STORAGE']) / latest_total * 100.0
+            latest_other_pct = float(latest_row['OTHER']) / latest_total * 100.0
+            latest_dt_pct = float(latest_row['DATA_TRANSFER']) / latest_total * 100.0
+            # Store raw splits and combined Compute+Other per your Excel mapping (I29 + K29)
+            st.session_state['og_latest_split_compute_pct'] = latest_compute_pct
+            st.session_state['og_latest_split_storage_pct'] = latest_storage_pct
+            st.session_state['og_latest_split_other_pct'] = latest_other_pct
+            st.session_state['og_latest_split_data_transfer_pct'] = latest_dt_pct
+            st.session_state['og_default_split_compute_pct'] = latest_compute_pct + latest_other_pct
+            st.session_state['og_default_split_storage_pct'] = latest_storage_pct
+            st.session_state['og_default_split_data_transfer_pct'] = latest_dt_pct
+    except Exception:
+        pass
+
+    # Remove global START/END selectors; use full available range
+    filtered_df = df.copy()
+    start_month = filtered_df['MONTH'].min().strftime('%Y-%m-%d')
+    end_month = filtered_df['MONTH'].max().strftime('%Y-%m-%d')
         
     if len(filtered_df) < 2:
         st.error(f"Insufficient data for growth calculation. Available dates: {df['MONTH'].min()} to {df['MONTH'].max()}")
         return
-        
-    # Create stacked bar chart visualization
-    fig = go.Figure()
-        
-    # Add stacked bars for each category
-    categories = ['COMPUTE', 'STORAGE', 'OTHER', 'DATA_TRANSFER', 'PRIORITY_SUPPORT']
-    colors = ['#11567F', '#29B5E8', '#71D3DC', '#FF9F36', '#7D44CF']  # Snowflake colors
     
-    for category, color in zip(categories, colors):
-        fig.add_trace(go.Bar(
-            x=filtered_df['MONTH'],
-            y=filtered_df[category],
-            name=category.replace('_', ' ').title(),
-            marker_color=color,
-            showlegend=True
-        ))
-        
-    # Update layout
-    fig.update_layout(
-        title=dict(
-            text=f"Monthly Revenue by Category ({start_month} to {end_month})",
-            font=dict(size=18, color="#11567F"),
-            x=0.5,
-            xanchor='center'
-        ),
-        xaxis_title="Month",
-        yaxis_title="Revenue ($)",
-        barmode='stack',
-        xaxis_tickformat="%b %Y",
-        xaxis_tickangle=-45,
-        plot_bgcolor='white',
-        paper_bgcolor='white',
-        font=dict(color="#11567F"),
-        height=500
-    )
-        
-    st.plotly_chart(fig, use_container_width=True)
-        
-    # Calculate growth rates
+    # --- Pre-compute Growth Rate Analysis (used in expander below) ---
     def calculate_cmgr(start_value, end_value, months):
-        """Calculate CMGR: (End/Start)^(1/months) - 1"""
         if start_value <= 0 or end_value <= 0 or months <= 0:
             return 0.0
         return (end_value / start_value) ** (1 / months) - 1
-    
     def calculate_cagr(start_value, end_value, years):
-        """Calculate CAGR: (End/Start)^(1/years) - 1"""
         if start_value <= 0 or end_value <= 0 or years <= 0:
             return 0.0
         return (end_value / start_value) ** (1 / years) - 1
-    
-    # Your requested categories (5 total)
     display_categories = ['COMPUTE', 'STORAGE', 'OTHER', 'DATA_TRANSFER', 'COMPUTE (TOTAL)']
-    
-    # Calculate different time period growth rates
     total_months = len(filtered_df) - 1
     years = total_months / 12
-    
-    # Growth rate periods you requested
     periods = [
         ('CAGR', years, 'years'),
-        ('12 months', 12, 'months'), 
+        ('12 months', 12, 'months'),
         ('6 months', 6, 'months'),
         ('3 months', 3, 'months'),
         ('1 month', 1, 'months')
     ]
-    
-    # Calculate growth rates for each category and period
     growth_data = {}
     for category in ['COMPUTE', 'STORAGE', 'OTHER', 'DATA_TRANSFER', 'PRIORITY_SUPPORT', 'TOTAL']:
         growth_data[category] = {}
-        
         for period_name, period_length, period_type in periods:
             if period_type == 'years' and total_months >= 12:
-                # Match Excel logic: simple percentage change over exactly 1 year
-                # Find data for exactly 1 year ago from latest month
                 latest_date = filtered_df['MONTH'].iloc[-1]
                 year_ago_date = latest_date - pd.DateOffset(years=1)
-                
-                # Find closest match to 1 year ago
                 year_ago_row = filtered_df[filtered_df['MONTH'] <= year_ago_date].iloc[-1] if len(filtered_df[filtered_df['MONTH'] <= year_ago_date]) > 0 else filtered_df.iloc[0]
                 latest_row = filtered_df.iloc[-1]
-                
                 start_val = year_ago_row[category]
                 end_val = latest_row[category]
-                
-                # Excel formula: =End/Start - 1 (simple percentage change)
-                if start_val > 0:
-                    growth_rate = (end_val / start_val - 1) * 100
-                else:
-                    growth_rate = 0.0
+                growth_rate = (end_val / start_val - 1) * 100 if start_val > 0 else 0.0
             elif period_type == 'months' and total_months >= period_length:
-                # Use last N months for CMGR calculation
                 if period_length <= total_months:
                     start_idx = max(0, len(filtered_df) - period_length - 1)
                     first_val = filtered_df.iloc[start_idx][category]
@@ -273,38 +202,47 @@ def render(connection, selected_customer_schema, validated_info, connection_type
                     growth_rate = 0.0
             else:
                 growth_rate = 0.0
-                
             growth_data[category][period_name] = growth_rate
-    
-    # Custom Period CMGR Calculator (moved above Growth Rate Analysis)
+    # Store 12-months growth in session for other slides and fallbacks
+    st.session_state['og_compute_cmgr'] = growth_data['COMPUTE'].get('12 months', 0.0)
+    st.session_state['og_storage_cmgr'] = growth_data['STORAGE'].get('12 months', 0.0)
+    st.session_state['og_other_cmgr'] = growth_data['OTHER'].get('12 months', 0.0)
+    st.session_state['og_data_transfer_cmgr'] = growth_data['DATA_TRANSFER'].get('12 months', 0.0)
+    st.session_state['og_priority_support_cmgr'] = growth_data['PRIORITY_SUPPORT'].get('12 months', 0.0)
+    st.session_state['og_total_cmgr'] = growth_data['TOTAL'].get('12 months', 0.0)
+    try:
+        if len(filtered_df) >= 13:
+            start_idx = len(filtered_df) - 12 - 1
+            compute_total_start = float(filtered_df.iloc[start_idx]['COMPUTE'] + filtered_df.iloc[start_idx]['OTHER'])
+            compute_total_end = float(filtered_df.iloc[-1]['COMPUTE'] + filtered_df.iloc[-1]['OTHER'])
+            if compute_total_start > 0:
+                compute_total_cmgr_12m = (compute_total_end / compute_total_start) ** (1 / 12) - 1
+                st.session_state['og_y1_compute_total_cmgr_fallback'] = compute_total_cmgr_12m * 100
+        st.session_state['og_y1_storage_cmgr_fallback'] = growth_data['STORAGE'].get('12 months', 0.0)
+        st.session_state['og_y1_data_transfer_cmgr_fallback'] = growth_data['DATA_TRANSFER'].get('12 months', 0.0)
+    except Exception:
+        pass
+
+    # ---- Custom Period CMGR Calculator (top) ----
     st.markdown("---")
     st.markdown("### Custom Period CMGR Calculator")
-    
+
     col1, col2 = st.columns(2)
     with col1:
         start_month = st.selectbox(
             "Start Month:",
             options=filtered_df['MONTH'].dt.strftime('%Y-%m-%d').tolist(),
             index=0,
-            key='custom_start_month'
+            key='custom_start_month_top'
         )
     with col2:
-        # Default to the latest available month without setting Session State directly
-        end_options = filtered_df['MONTH'].dt.strftime('%Y-%m-%d').tolist()
-        existing_value = st.session_state.get('custom_end_month')
-        default_index = (
-            end_options.index(existing_value)
-            if existing_value in end_options
-            else len(end_options) - 1
-        )
         end_month = st.selectbox(
             "End Month:",
-            options=end_options,
-            index=default_index,
-            key='custom_end_month',
-            help="Defaults to the latest complete month"
+            options=filtered_df['MONTH'].dt.strftime('%Y-%m-%d').tolist(),
+            index=len(filtered_df)-1,
+            key='custom_end_month_top'
         )
-    
+
     if start_month and end_month:
         start_date = pd.to_datetime(start_month)
         end_date = pd.to_datetime(end_month)
@@ -312,106 +250,185 @@ def render(connection, selected_customer_schema, validated_info, connection_type
         if start_date < end_date:
             start_row = filtered_df[filtered_df['MONTH'] == start_date]
             end_row = filtered_df[filtered_df['MONTH'] == end_date]
-            
+
             if len(start_row) > 0 and len(end_row) > 0:
                 months_diff = (end_date.year - start_date.year) * 12 + (end_date.month - start_date.month)
-                
+
                 st.markdown(f"**CMGR(%) ({months_diff} month(s))**")
-                
+
                 # Calculate and store custom CMGR values
                 custom_cmgr_values = {}
-                custom_cols = st.columns(len(display_categories))
-                
+                custom_cols = st.columns(5)
+
                 for i, category in enumerate(['COMPUTE', 'STORAGE', 'OTHER', 'DATA_TRANSFER', 'TOTAL']):
                     with custom_cols[i]:
-                        start_val = start_row[category].iloc[0]
-                        end_val = end_row[category].iloc[0]
-                        
+                        # For "COMPUTE (TOTAL)", Excel folds OTHER into COMPUTE
+                        if category == 'TOTAL':
+                            start_val = float(start_row['COMPUTE'].iloc[0] + start_row['OTHER'].iloc[0])
+                            end_val = float(end_row['COMPUTE'].iloc[0] + end_row['OTHER'].iloc[0])
+                        else:
+                            start_val = start_row[category].iloc[0]
+                            end_val = end_row[category].iloc[0]
+
                         if start_val > 0 and months_diff > 0:
                             custom_cmgr = ((end_val / start_val) ** (1 / months_diff) - 1) * 100
                         else:
                             custom_cmgr = 0.0
-                        
-                        # Store the calculated value
+
                         custom_cmgr_values[category] = custom_cmgr
-                        
+
                         color = "#28a745" if custom_cmgr > 0 else "#dc3545" if custom_cmgr < 0 else "#6c757d"
                         display_name = "COMPUTE (TOTAL)" if category == 'TOTAL' else category
-                        
+
                         st.markdown(f"""
                         <div style="text-align: center; padding: 0.5rem; background-color: #f8f9fa; border-radius: 4px; border-left: 3px solid {color};">
                             <div style="font-weight: bold; color: {color}; font-size: 1.1rem;">{custom_cmgr:.2f}%</div>
                             <div style="font-size: 0.8rem; color: #6c757d;">{display_name}</div>
                         </div>
                         """, unsafe_allow_html=True)
-                
-                # Store in session state for the apply button
-                st.session_state.custom_cmgr_values = custom_cmgr_values
-                st.session_state.custom_cmgr_values['PRIORITY_SUPPORT'] = 0.0  # Not calculated for custom periods
-                
-            # Custom Period Apply Button - aligned like standard section
-            st.markdown("")
-            col1, col2, col3 = st.columns([1, 1, 1])
-            with col2:
-                if st.button(
-                    f"Apply Custom Period CMGR ({months_diff} months)",
-                    help=f"Transfer custom period CMGR values from {start_month} to {end_month}",
-                    use_container_width=True,
-                    type="secondary",
-                    key="apply_custom_cmgr"
-                ):
-                    # Use the calculated values directly
-                    st.session_state.forecast_year1_compute_growth = custom_cmgr_values.get('COMPUTE', 0.0)
-                    st.session_state.forecast_year1_storage_growth = custom_cmgr_values.get('STORAGE', 0.0)
-                    st.session_state.forecast_year1_other_growth = custom_cmgr_values.get('OTHER', 0.0)
-                    st.session_state.forecast_year1_data_transfer_growth = custom_cmgr_values.get('DATA_TRANSFER', 0.0)
-                    st.session_state.forecast_year1_priority_support_growth = 0.0  # Not calculated for custom periods
-                    
-                    st.success(f"""
-                    Applied Custom Period CMGR ({months_diff} months) to Forecast Overview:
-                    - Compute: {custom_cmgr_values.get('COMPUTE', 0.0):.2f}% monthly
-                    - Storage: {custom_cmgr_values.get('STORAGE', 0.0):.2f}% monthly  
-                    - Other: {custom_cmgr_values.get('OTHER', 0.0):.2f}% monthly
-                    - Data Transfer: {custom_cmgr_values.get('DATA_TRANSFER', 0.0):.2f}% monthly
-                    - Priority Support: 0.00% monthly (not calculated for custom periods)
-                    
-                    *Period: {start_month} to {end_month} ({months_diff} months)*
-                    """)
-                
-        else:
-            st.warning("End month must be after start month")
-    
-    # After custom period section, show Growth Rate Analysis (moved below)
-    st.markdown("---")
-    st.markdown("### Growth Rate Analysis")
-    
-    # Create table
-    col_headers = ['Metric'] + display_categories
-    cols = st.columns(len(col_headers))
-    
-    # Header row
-    for i, header in enumerate(col_headers):
-        with cols[i]:
-            st.markdown(f"**{header}**")
-    
-    # Data rows  
-    for period_name, _, _ in periods:
-        cols = st.columns(len(col_headers))
-        with cols[0]:
-            metric_label = f"{period_name} (%)" if period_name != 'CAGR' else "CAGR (%)"
-            st.markdown(f"**{metric_label}**")
-        
-        # Data columns
-        for i, category in enumerate(['COMPUTE', 'STORAGE', 'OTHER', 'DATA_TRANSFER', 'TOTAL']):
-            with cols[i + 1]:
-                display_cat = category
-                growth_rate = growth_data[display_cat].get(period_name, 0.0)
-                color = "#28a745" if growth_rate > 0 else "#dc3545" if growth_rate < 0 else "#6c757d"
-                st.markdown(
-                    f'<span style="color: {color}; font-weight: bold;">{growth_rate:.1f}%</span>',
-                    unsafe_allow_html=True,
-                )
 
+                # Store in session state for use case defaults
+                st.session_state['og_y1_storage_cmgr'] = custom_cmgr_values.get('STORAGE', 0.0)
+                st.session_state['og_y1_data_transfer_cmgr'] = custom_cmgr_values.get('DATA_TRANSFER', 0.0)
+                try:
+                    compute_total_start = float(start_row['COMPUTE'].iloc[0] + start_row['OTHER'].iloc[0])
+                    compute_total_end = float(end_row['COMPUTE'].iloc[0] + end_row['OTHER'].iloc[0])
+                    compute_total_cmgr = ((compute_total_end / compute_total_start) ** (1 / months_diff) - 1) * 100 if compute_total_start > 0 else 0.0
+                except Exception:
+                    compute_total_cmgr = 0.0
+                st.session_state['og_y1_compute_total_cmgr'] = compute_total_cmgr
+
+                # Apply button (Y1 only)
+                if st.button(
+                    f"Apply Calculated CMGR (Y1)",
+                    help="Set Y1 monthly CMGR defaults for Use Case Forecaster",
+                    type="primary",
+                    key="apply_custom_cmgr_y1"
+                ):
+                    st.success("Applied to Y1 defaults for Use Case Forecaster.")
+                    st.rerun()
+
+                # Analysis dropdowns placed right after calculator
+                with st.expander("Growth Rate Analysis", expanded=False):
+                    col_headers = ['Metric'] + display_categories
+                    cols = st.columns(len(col_headers))
+                    for i, header in enumerate(col_headers):
+                        with cols[i]:
+                            st.markdown(f"**{header}**")
+                    for period_name, _, _ in periods:
+                        cols = st.columns(len(col_headers))
+                        with cols[0]:
+                            metric_label = f"{period_name} (%)" if period_name != 'CAGR' else "CAGR (%)"
+                            st.markdown(f"**{metric_label}**")
+                        for i, category in enumerate(['COMPUTE', 'STORAGE', 'OTHER', 'DATA_TRANSFER', 'TOTAL']):
+                            with cols[i + 1]:
+                                display_cat = category
+                                growth_rate = growth_data[display_cat].get(period_name, 0.0)
+                                color = "#28a745" if growth_rate > 0 else "#dc3545" if growth_rate < 0 else "#6c757d"
+                                st.markdown(f'<span style="color: {color}; font-weight: bold;">{growth_rate:.1f}%</span>', unsafe_allow_html=True)
+
+                with st.expander("View Monthly Data", expanded=False):
+                    display_df = filtered_df.copy()
+                    display_df['MONTH'] = display_df['MONTH'].dt.strftime('%b %Y')
+                    currency_cols = ['COMPUTE', 'STORAGE', 'OTHER', 'DATA_TRANSFER', 'PRIORITY_SUPPORT', 'TOTAL']
+                    for col in currency_cols:
+                        display_df[col] = display_df[col].apply(lambda x: f"${x:,.2f}")
+                    st.dataframe(display_df, use_container_width=True)
+
+    # Manual Y1–Y5 CMGR inputs for Compute, Storage, Data Transfer
+    st.markdown("#### Organic Growth CMGR Presets and Y1–Y5 Overrides")
+    # Build recommended defaults
+    rec_compute = [
+        float(st.session_state.get('og_y1_compute_total_cmgr', st.session_state.get('og_y1_compute_total_cmgr_fallback', 0.0))),
+        0.8, 1.0, 1.0, 1.0,
+    ]
+    rec_storage = [
+        float(st.session_state.get('og_y1_storage_cmgr', st.session_state.get('og_y1_storage_cmgr_fallback', 0.0))),
+        0.8, 1.2, 1.2, 1.2,
+    ]
+    rec_dt = [
+        float(st.session_state.get('og_y1_data_transfer_cmgr', st.session_state.get('og_y1_data_transfer_cmgr_fallback', 0.0))),
+        0.0, 0.0, 0.0, 0.0,
+    ]
+    preset = st.selectbox(
+        "Preset",
+        ["Recommended", "Flat 0%", "Flat at Y1"],
+        index=0,
+        help="Recommended = calculated Y1 then typical Y2–Y5. Flat at Y1 = copy Y1 to all years."
+    )
+    if st.button("Reset to preset"):
+        if preset == "Recommended":
+            st.session_state['og_y1_compute_total_cmgr'], st.session_state['og_y2_compute_cmgr'], st.session_state['og_y3_compute_cmgr'], st.session_state['og_y4_compute_cmgr'], st.session_state['og_y5_compute_cmgr'] = rec_compute
+            st.session_state['og_y1_storage_cmgr'], st.session_state['og_y2_storage_cmgr'], st.session_state['og_y3_storage_cmgr'], st.session_state['og_y4_storage_cmgr'], st.session_state['og_y5_storage_cmgr'] = rec_storage
+            st.session_state['og_y1_data_transfer_cmgr'], st.session_state['og_y2_data_transfer_cmgr'], st.session_state['og_y3_data_transfer_cmgr'], st.session_state['og_y4_data_transfer_cmgr'], st.session_state['og_y5_data_transfer_cmgr'] = rec_dt
+        elif preset == "Flat 0%":
+            # Compute uses 'compute_total_cmgr' for Y1, but 'compute_cmgr' for Y2–Y5
+            st.session_state['og_y1_compute_total_cmgr'] = 0.0
+            for n in [2, 3, 4, 5]:
+                st.session_state[f'og_y{n}_compute_cmgr'] = 0.0
+            for k in ['og_y1_', 'og_y2_', 'og_y3_', 'og_y4_', 'og_y5_']:
+                st.session_state[k + 'storage_cmgr'] = 0.0
+                st.session_state[k + 'data_transfer_cmgr'] = 0.0
+        elif preset == "Flat at Y1":
+            c1 = float(st.session_state.get('og_y1_compute_total_cmgr', 0.0))
+            s1 = float(st.session_state.get('og_y1_storage_cmgr', 0.0))
+            d1 = float(st.session_state.get('og_y1_data_transfer_cmgr', 0.0))
+            st.session_state['og_y2_compute_cmgr'] = st.session_state['og_y3_compute_cmgr'] = st.session_state['og_y4_compute_cmgr'] = st.session_state['og_y5_compute_cmgr'] = c1
+            st.session_state['og_y2_storage_cmgr'] = st.session_state['og_y3_storage_cmgr'] = st.session_state['og_y4_storage_cmgr'] = st.session_state['og_y5_storage_cmgr'] = s1
+            st.session_state['og_y2_data_transfer_cmgr'] = st.session_state['og_y3_data_transfer_cmgr'] = st.session_state['og_y4_data_transfer_cmgr'] = st.session_state['og_y5_data_transfer_cmgr'] = d1
+        st.rerun()
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.write("Compute (TOTAL)")
+        c_y1 = float(st.session_state.get('og_y1_compute_total_cmgr', 0.0))
+        c_y2d = float(st.session_state.get('og_y2_compute_cmgr', rec_compute[1]))
+        c_y3d = float(st.session_state.get('og_y3_compute_cmgr', rec_compute[2]))
+        c_y4d = float(st.session_state.get('og_y4_compute_cmgr', rec_compute[3]))
+        c_y5d = float(st.session_state.get('og_y5_compute_cmgr', rec_compute[4]))
+        st.session_state['og_y1_compute_total_cmgr'] = st.number_input("Y1", value=c_y1, step=0.01, key="og_custom_c_cy1")
+        st.session_state['og_y2_compute_cmgr'] = st.number_input("Y2", value=c_y2d, step=0.01, key="og_custom_c_cy2")
+        st.session_state['og_y3_compute_cmgr'] = st.number_input("Y3", value=c_y3d, step=0.01, key="og_custom_c_cy3")
+        st.session_state['og_y4_compute_cmgr'] = st.number_input("Y4", value=c_y4d, step=0.01, key="og_custom_c_cy4")
+        st.session_state['og_y5_compute_cmgr'] = st.number_input("Y5", value=c_y5d, step=0.01, key="og_custom_c_cy5")
+    with c2:
+        st.write("Storage")
+        s_y1 = float(st.session_state.get('og_y1_storage_cmgr', 0.0))
+        s_y2d = float(st.session_state.get('og_y2_storage_cmgr', rec_storage[1]))
+        s_y3d = float(st.session_state.get('og_y3_storage_cmgr', rec_storage[2]))
+        s_y4d = float(st.session_state.get('og_y4_storage_cmgr', rec_storage[3]))
+        s_y5d = float(st.session_state.get('og_y5_storage_cmgr', rec_storage[4]))
+        st.session_state['og_y1_storage_cmgr'] = st.number_input("Y1 ", value=s_y1, step=0.01, key="og_custom_s_cy1")
+        st.session_state['og_y2_storage_cmgr'] = st.number_input("Y2 ", value=s_y2d, step=0.01, key="og_custom_s_cy2")
+        st.session_state['og_y3_storage_cmgr'] = st.number_input("Y3 ", value=s_y3d, step=0.01, key="og_custom_s_cy3")
+        st.session_state['og_y4_storage_cmgr'] = st.number_input("Y4 ", value=s_y4d, step=0.01, key="og_custom_s_cy4")
+        st.session_state['og_y5_storage_cmgr'] = st.number_input("Y5 ", value=s_y5d, step=0.01, key="og_custom_s_cy5")
+    with c3:
+        st.write("Data Transfer")
+        d_y1 = float(st.session_state.get('og_y1_data_transfer_cmgr', 0.0))
+        d_y2d = float(st.session_state.get('og_y2_data_transfer_cmgr', rec_dt[1]))
+        d_y3d = float(st.session_state.get('og_y3_data_transfer_cmgr', rec_dt[2]))
+        d_y4d = float(st.session_state.get('og_y4_data_transfer_cmgr', rec_dt[3]))
+        d_y5d = float(st.session_state.get('og_y5_data_transfer_cmgr', rec_dt[4]))
+        st.session_state['og_y1_data_transfer_cmgr'] = st.number_input("Y1  ", value=d_y1, step=0.01, key="og_custom_dt_cy1")
+        st.session_state['og_y2_data_transfer_cmgr'] = st.number_input("Y2  ", value=d_y2d, step=0.01, key="og_custom_dt_cy2")
+        st.session_state['og_y3_data_transfer_cmgr'] = st.number_input("Y3  ", value=d_y3d, step=0.01, key="og_custom_dt_cy3")
+        st.session_state['og_y4_data_transfer_cmgr'] = st.number_input("Y4  ", value=d_y4d, step=0.01, key="og_custom_dt_cy4")
+        st.session_state['og_y5_data_transfer_cmgr'] = st.number_input("Y5  ", value=d_y5d, step=0.01, key="og_custom_dt_cy5")
+
+    st.caption("Y1 uses your calculated CMGR when you press Apply; Y2–Y5 are manual unless you tick 'Copy Y1 to Y2–Y5'. These are monthly rates; baseline and forecasts apply them piecewise by year (months 1–12 use Y1, 13–24 use Y2, etc.).")
+    if st.button("Apply Organic Growth Y1–Y5", key="og_apply_y1_y5"):
+        st.success("Applied. Baseline and charts now use these Y1–Y5 rates.")
+        
+    # Create stacked bar chart visualization
+    fig = go.Figure()
+    categories = ['COMPUTE', 'STORAGE', 'OTHER', 'DATA_TRANSFER', 'PRIORITY_SUPPORT']
+    colors = ['#11567F', '#29B5E8', '#71D3DC', '#FF9F36', '#7D44CF']
+    for category, color in zip(categories, colors):
+        fig.add_trace(go.Bar(x=filtered_df['MONTH'], y=filtered_df[category], name=category.replace('_', ' ').title(), marker_color=color, showlegend=True))
+    fig.update_layout(title=dict(text=f"Monthly Revenue by Category ({start_month} to {end_month})", font=dict(size=18, color="#11567F"), x=0.5, xanchor='center'), xaxis_title="Month", yaxis_title="Revenue ($)", barmode='stack', xaxis_tickformat="%b %Y", xaxis_tickangle=-45, plot_bgcolor='white', paper_bgcolor='white', font=dict(color="#11567F"), height=500)
+    st.plotly_chart(fig, use_container_width=True)
+    # (Duplicate calculator removed to avoid redundancy; top calculator retained)
     # Store in session state for forecast overview
     st.session_state['og_compute_cmgr'] = growth_data['COMPUTE'].get('12 months', 0.0)
     st.session_state['og_storage_cmgr'] = growth_data['STORAGE'].get('12 months', 0.0)
@@ -419,15 +436,5 @@ def render(connection, selected_customer_schema, validated_info, connection_type
     st.session_state['og_data_transfer_cmgr'] = growth_data['DATA_TRANSFER'].get('12 months', 0.0)
     st.session_state['og_priority_support_cmgr'] = growth_data['PRIORITY_SUPPORT'].get('12 months', 0.0)
     st.session_state['og_total_cmgr'] = growth_data['TOTAL'].get('12 months', 0.0)
-        
-    # Show data table
-    with st.expander("View Monthly Data"):
-        display_df = filtered_df.copy()
-        display_df['MONTH'] = display_df['MONTH'].dt.strftime('%b %Y')
-        
-        # Format currency columns
-        currency_cols = ['COMPUTE', 'STORAGE', 'OTHER', 'DATA_TRANSFER', 'PRIORITY_SUPPORT', 'TOTAL']
-        for col in currency_cols:
-            display_df[col] = display_df[col].apply(lambda x: f"${x:,.2f}")
-            
-        st.dataframe(display_df, use_container_width=True)
+    
+    # Removed duplicate analysis/table sections
