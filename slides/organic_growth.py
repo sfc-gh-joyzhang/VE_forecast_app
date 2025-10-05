@@ -290,6 +290,22 @@ def render(connection, selected_customer_schema, validated_info, connection_type
                 # Store in session state for use case defaults
                 st.session_state['og_y1_storage_cmgr'] = custom_cmgr_values.get('STORAGE', 0.0)
                 st.session_state['og_y1_data_transfer_cmgr'] = custom_cmgr_values.get('DATA_TRANSFER', 0.0)
+                # Initialize Y2–Y5 sensible defaults once so the rest of the app has non-zero rates by default
+                if 'og_rates_initialized' not in st.session_state:
+                    # Compute TOTAL uses compute+other for Y1; for Y2–Y5 use typical presets
+                    st.session_state['og_y2_compute_cmgr'] = 0.8
+                    st.session_state['og_y3_compute_cmgr'] = 1.0
+                    st.session_state['og_y4_compute_cmgr'] = 1.0
+                    st.session_state['og_y5_compute_cmgr'] = 1.0
+                    st.session_state['og_y2_storage_cmgr'] = 0.8
+                    st.session_state['og_y3_storage_cmgr'] = 1.2
+                    st.session_state['og_y4_storage_cmgr'] = 1.2
+                    st.session_state['og_y5_storage_cmgr'] = 1.2
+                    st.session_state['og_y2_data_transfer_cmgr'] = 0.0
+                    st.session_state['og_y3_data_transfer_cmgr'] = 0.0
+                    st.session_state['og_y4_data_transfer_cmgr'] = 0.0
+                    st.session_state['og_y5_data_transfer_cmgr'] = 0.0
+                    st.session_state['og_rates_initialized'] = True
                 try:
                     compute_total_start = float(start_row['COMPUTE'].iloc[0] + start_row['OTHER'].iloc[0])
                     compute_total_end = float(end_row['COMPUTE'].iloc[0] + end_row['OTHER'].iloc[0])

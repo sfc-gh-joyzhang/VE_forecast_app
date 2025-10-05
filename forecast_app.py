@@ -1,6 +1,8 @@
 import streamlit as st
 import importlib
 import os
+import pandas as pd
+from datetime import datetime
 from browser_connection import execute_sql
 
 # Try to get Snowflake connection - cache in session state to avoid re-auth
@@ -46,7 +48,8 @@ def init_session_state():
     if 'forecast_initialized' not in st.session_state:
         st.session_state.forecast_initialized = True
         st.session_state.selected_customer = 'SIEMENS_AG'
-        st.session_state.selected_slides = ['Forecast Overview', 'Organic Growth']
+        # Show only Overview by default for faster initial load
+        st.session_state.selected_slides = ['Forecast Overview']
         
         # Forecast growth rates from organic growth
         st.session_state.forecast_year1_compute_growth = 0.0
@@ -237,6 +240,77 @@ if selected_schema:
     st.sidebar.markdown("---")
     st.sidebar.markdown("**Schema Selected:**")
     st.sidebar.markdown(f"`{selected_customer_schema}`")
+
+    # Pre-fetch defaults for Overview: use cases and optimizations (only after selection)
+    try:
+        import slides.use_case_forecaster as ucf_mod
+        if not st.session_state.get("ucf_use_cases"):
+            known_uc = ucf_mod._fetch_known_use_cases(session if use_snowpark else cursor, selected_customer_schema, 'snowpark' if use_snowpark else 'cursor')
+            rows = []
+            if known_uc is not None and len(known_uc) > 0:
+                for _, r in known_uc.iterrows():
+                    rows.append({
+                        "use_case": str(r.get("USE_CASE", "")).strip(),
+                        "stage": str(r.get("STAGE", "")).strip(),
+                        "implementation_start": pd.to_datetime(r.get("IMPLEMENTATION_START", None), errors="coerce"),
+                        "go_live": pd.to_datetime(r.get("GO_LIVE", None), errors="coerce"),
+                        "implementation_months": 3,
+                        "ramp_curve": "Linear Ramp",
+                        "annualized_cost": float(r.get("ANNUALIZED_COST", 0.0) or 0.0),
+                        # default splits from OG session if available
+                        "split_compute_pct": float(st.session_state.get('og_default_split_compute_pct', 100.0)),
+                        "split_storage_pct": float(st.session_state.get('og_default_split_storage_pct', 0.0)),
+                        "split_data_transfer_pct": float(st.session_state.get('og_default_split_data_transfer_pct', 0.0)),
+                        # default growth Y1 from OG
+                        "compute_grow_y1_pct": float(st.session_state.get("og_y1_compute_total_cmgr", st.session_state.get("og_y1_compute_total_cmgr_fallback", 0.0))),
+                        "compute_grow_y2_pct": 0.0,
+                        "compute_grow_y3_pct": 0.0,
+                        "compute_grow_y4_pct": 0.0,
+                        "compute_grow_y5_pct": 0.0,
+                        "storage_grow_y1_pct": float(st.session_state.get("og_y1_storage_cmgr", st.session_state.get("og_y1_storage_cmgr_fallback", 0.0))),
+                        "storage_grow_y2_pct": 0.0,
+                        "storage_grow_y3_pct": 0.0,
+                        "storage_grow_y4_pct": 0.0,
+                        "storage_grow_y5_pct": 0.0,
+                    })
+                if rows:
+                    st.session_state.ucf_use_cases = rows
+    except Exception:
+        pass
+
+    try:
+        import slides.optimization_forecast as opt_mod
+        if not st.session_state.get("opt_rows"):
+            known_opt = opt_mod._fetch_known_optimizations(session if use_snowpark else cursor, selected_customer_schema, 'snowpark' if use_snowpark else 'cursor')
+            rows = []
+            if known_opt is not None and len(known_opt) > 0:
+                for _, r in known_opt.iterrows():
+                    name = f"{str(r.get('ROCK_CATEGORY','')).title()} - {str(r.get('ROCK','')).title()}"
+                    for rng, col in [("LOW", "LOW_SAVINGS"), ("HIGH", "HIGH_SAVINGS")]:
+                        amount = float(r.get(col, 0.0) or 0.0)
+                        if amount == 0:
+                            continue
+                        rg = str(r.get("REVENUE_GROUP", "COMPUTE")).upper()
+                        c, s, dt = 100.0, 0.0, 0.0
+                        if rg.startswith("STORAGE"):
+                            c, s, dt = 0.0, 100.0, 0.0
+                        elif rg.startswith("DATA"):
+                            c, s, dt = 0.0, 0.0, 100.0
+                        rows.append({
+                            "optimization": name,
+                            "implementation_start": pd.to_datetime(datetime.today()),
+                            "implementation_months": 3,
+                            "ramp_curve": "Linear Ramp",
+                            "range": rng,
+                            "annualized_savings": float(amount),
+                            "split_compute_pct": c,
+                            "split_storage_pct": s,
+                            "split_dt_pct": dt,
+                        })
+                if rows:
+                    st.session_state.opt_rows = rows
+    except Exception:
+        pass
 else:
     st.sidebar.info("Select a FINOPS_OUTPUTS schema to begin")
 

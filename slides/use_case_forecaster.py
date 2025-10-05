@@ -624,6 +624,35 @@ def _render_charts(monthly_df: pd.DataFrame, stage_df: pd.DataFrame) -> None:
 
             forecast_amt = [baseline_series[i] + new_cases_series[i] for i in range(len(forecast_months))]
 
+            # Diagnostics: detect any unexpected drop in the forecast series
+            try:
+                drops = []
+                for i in range(1, len(forecast_amt)):
+                    if forecast_amt[i] < forecast_amt[i - 1] - 1e-6:
+                        drops.append((forecast_months[i], forecast_amt[i - 1], forecast_amt[i]))
+                if drops:
+                    first_drop = drops[0]
+                    st.warning(
+                        f"Detected drop in Forecast Trend at {first_drop[0].strftime('%Y-%m')} \n"
+                        f"Prev={first_drop[1]:,.2f}, Curr={first_drop[2]:,.2f}. "
+                        f"This typically means added use cases decline or monthly inputs are zero for that period."
+                    )
+                    with st.expander("View drop diagnostics"):
+                        st.write("First 5 drops (month, prev, curr):", drops[:5])
+                        st.write("Check baseline vs new cases contributions around the drop:")
+                        idx = max(1, forecast_months.index(first_drop[0]) - 2)
+                        sample = []
+                        for j in range(idx, min(idx + 5, len(forecast_months))):
+                            sample.append({
+                                "MONTH": forecast_months[j],
+                                "BASELINE": baseline_series[j],
+                                "NEW_CASES": new_cases_series[j],
+                                "TOTAL": forecast_amt[j],
+                            })
+                        st.dataframe(pd.DataFrame(sample))
+            except Exception:
+                pass
+
             trend_df = pd.DataFrame({
                 "MONTH": list(hist_tail["MONTH"]) + forecast_months,
                 "BILL": list(hist_tail["BILL"]) + [None] * len(forecast_months),
