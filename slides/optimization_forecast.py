@@ -56,19 +56,29 @@ def _fetch_known_optimizations(connection, selected_customer_schema: str, connec
 
 
 def _curve_ramp_factor(curve: str, months_since_start: int, ramp_months: int) -> float:
+    """Excel-style ramp using exponents from Forecast Lookups.
+
+    Uses x = (t - s + 1) / (e - s + 1) with exponent mapping:
+      Slowest=4.0, Slow=2.0, Linear=1.0, Fast=0.75, Fastest=0.5
+    Manual returns 0 (allowing manual overrides upstream if desired).
+    """
     if ramp_months <= 0:
         return 1.0
+    # Clamp to [0, ramp_months]
     m = max(0, min(months_since_start, ramp_months))
-    x = m / float(ramp_months)
-    if curve == "Slowest Ramp":
-        return x ** 3
-    if curve == "Slow Ramp":
-        return x ** 2
-    if curve == "Fast Ramp":
-        return 1 - (1 - x) ** 2
-    if curve == "Fastest Ramp":
-        return 1 - (1 - x) ** 3
-    return x  # Linear/Manual
+    # Excel uses 1-based index inside the window
+    x = (m + 1) / float(ramp_months + 1)
+    exp_map = {
+        "Slowest Ramp": 4.0,
+        "Slow Ramp": 2.0,
+        "Linear Ramp": 1.0,
+        "Fast Ramp": 0.75,
+        "Fastest Ramp": 0.5,
+    }
+    if curve == "Manual":
+        return 0.0
+    exponent = exp_map.get(curve, 1.0)
+    return x ** exponent
 
 
 def _build_month_range(rows_df: pd.DataFrame, horizon_months: int) -> List[datetime]:
@@ -99,6 +109,22 @@ def _editor_dataframe() -> pd.DataFrame:
     range_options = ["LOW", "HIGH"]
 
     df = pd.DataFrame(st.session_state["opt_rows"]) if st.session_state["opt_rows"] else pd.DataFrame()
+    # Default precise splits based on optimization type when splits missing
+    if not df.empty:
+        def _default_splits(name: str) -> tuple:
+            n = (name or "").lower()
+            # Map common optimization names to spend category
+            if any(k in n for k in ["storage", "autocluster", "unused storage", "inactive storage"]):
+                return 0.0, 100.0, 0.0
+            if any(k in n for k in ["transfer", "egress", "data transfer"]):
+                return 0.0, 0.0, 100.0
+            return 100.0, 0.0, 0.0  # default to compute
+        for i, r in df.iterrows():
+            if pd.isna(r.get("split_compute_pct")) and pd.isna(r.get("split_storage_pct")) and pd.isna(r.get("split_data_transfer_pct")):
+                c, s, dt = _default_splits(str(r.get("optimization", "")))
+                df.loc[i, "split_compute_pct"] = c
+                df.loc[i, "split_storage_pct"] = s
+                df.loc[i, "split_data_transfer_pct"] = dt
     if not df.empty:
         for date_col in ["implementation_start"]:
             if date_col in df.columns:
@@ -108,12 +134,12 @@ def _editor_dataframe() -> pd.DataFrame:
         "optimization": st.column_config.TextColumn("OPTIMIZATION", required=True),
         "implementation_start": st.column_config.DateColumn("IMPLEMENTATION START DATE", format="YYYY-MM-DD", required=True),
         "implementation_months": st.column_config.NumberColumn("TOTAL IMPLEMENTATION MONTHS", min_value=0, max_value=60, step=1),
-        "ramp_curve": st.column_config.SelectboxColumn("RAMP UP CURVE", options=ramp_options, required=True),
+        "ramp_curve": st.column_config.SelectboxColumn("RAMP UP CURVE", options=ramp_options, required=True, default="Linear Ramp"),
         "range_type": st.column_config.SelectboxColumn("RANGE", options=range_options, required=True),
         "annualized_savings": st.column_config.NumberColumn("ANNUALIZED SAVINGS ($)", min_value=0.0),
-        "split_compute_pct": st.column_config.NumberColumn("COMPUTE %", min_value=0.0, max_value=100.0, step=0.01, format="%.2f"),
-        "split_storage_pct": st.column_config.NumberColumn("STORAGE %", min_value=0.0, max_value=100.0, step=0.01, format="%.2f"),
-        "split_data_transfer_pct": st.column_config.NumberColumn("DATA TRANSFER %", min_value=0.0, max_value=100.0, step=0.01, format="%.2f"),
+        "split_compute_pct": st.column_config.NumberColumn("COMPUTE %", min_value=0.0, max_value=100.0, step=0.01, format="%.2f", default=100.0),
+        "split_storage_pct": st.column_config.NumberColumn("STORAGE %", min_value=0.0, max_value=100.0, step=0.01, format="%.2f", default=0.0),
+        "split_data_transfer_pct": st.column_config.NumberColumn("DATA TRANSFER %", min_value=0.0, max_value=100.0, step=0.01, format="%.2f", default=0.0),
         "savings_y1_pct": st.column_config.NumberColumn("Savings MoM Change Y1 %", step=0.01, min_value=-100.0, max_value=100.0, format="%.2f"),
         "savings_y2_pct": st.column_config.NumberColumn("Savings MoM Change Y2 %", step=0.01, min_value=-100.0, max_value=100.0, format="%.2f"),
         "savings_y3_pct": st.column_config.NumberColumn("Savings MoM Change Y3 %", step=0.01, min_value=-100.0, max_value=100.0, format="%.2f"),
